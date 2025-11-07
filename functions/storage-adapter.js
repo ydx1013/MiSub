@@ -14,7 +14,8 @@ export const STORAGE_TYPES = {
 const DATA_KEYS = {
     SUBSCRIPTIONS: 'misub_subscriptions_v1',
     PROFILES: 'misub_profiles_v1', 
-    SETTINGS: 'worker_settings_v1'
+    SETTINGS: 'worker_settings_v1',
+    CACHED_NODES_PREFIX: 'misub_cached_nodes_v1:', // --- 新增：节点缓存键前缀 ---
 };
 
 /**
@@ -27,6 +28,11 @@ class KVStorageAdapter {
 
     async get(key, type = 'json') {
         try {
+            // --- 修改：如果是节点缓存，则始终获取文本 ---
+            if (key.startsWith(DATA_KEYS.CACHED_NODES_PREFIX)) {
+                return await this.kv.get(key, 'text');
+            }
+            // --- 结束修改 ---
             return await this.kv.get(key, type);
         } catch (error) {
             console.error(`[KV] Failed to get key ${key}:`, error);
@@ -36,7 +42,11 @@ class KVStorageAdapter {
 
     async put(key, value) {
         try {
-            const data = typeof value === 'string' ? value : JSON.stringify(value);
+            // --- 修改：如果是非JSON字符串（如节点缓存），则直接存储 ---
+            const data = (typeof value === 'string' && key.startsWith(DATA_KEYS.CACHED_NODES_PREFIX))
+                ? value 
+                : JSON.stringify(value);
+            // --- 结束修改 ---
             await this.kv.put(key, data);
             return true;
         } catch (error) {
@@ -79,11 +89,23 @@ class D1StorageAdapter {
             // 根据 key 确定查询的表和字段
             const { table, queryField, queryValue } = this._parseKey(key);
 
+            // --- 修改：如果是节点缓存，则始终获取文本 ---
+            if (table === 'cached_nodes') {
+                type = 'text';
+            }
+            // --- 结束修改 ---
+
             const result = await this.db.prepare(
                 `SELECT ${table === 'settings' ? 'value as data' : 'data'} FROM ${table} WHERE ${queryField} = ?`
             ).bind(queryValue).first();
 
             if (!result) return null;
+            
+            // --- 修改：如果是文本类型，则直接返回data ---
+            if (type === 'text') {
+                return result.data;
+            }
+            // --- 结束修改 ---
 
             return type === 'json' ? JSON.parse(result.data) : result.data;
         } catch (error) {
@@ -95,7 +117,12 @@ class D1StorageAdapter {
     async put(key, value) {
         try {
             const { table, queryField, queryValue } = this._parseKey(key);
-            const data = typeof value === 'string' ? value : JSON.stringify(value);
+            
+            // --- 修改：如果是非JSON字符串（如节点缓存），则直接存储 ---
+            const data = (typeof value === 'string' && table === 'cached_nodes')
+                ? value
+                : JSON.stringify(value);
+            // --- 结束修改 ---
 
             if (table === 'settings') {
                 // settings 表使用 key-value 结构
@@ -104,7 +131,7 @@ class D1StorageAdapter {
                     VALUES (?, ?, CURRENT_TIMESTAMP)
                 `).bind(queryValue, data).run();
             } else {
-                // subscriptions 和 profiles 表使用 id-data 结构
+                // subscriptions, profiles, cached_nodes 表使用 id-data 结构
                 await this.db.prepare(`
                     INSERT OR REPLACE INTO ${table} (id, data, updated_at)
                     VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -139,7 +166,8 @@ class D1StorageAdapter {
             const tables = [
                 { name: 'subscriptions', keyField: 'id' },
                 { name: 'profiles', keyField: 'id' },
-                { name: 'settings', keyField: 'key' }
+                { name: 'settings', keyField: 'key' },
+                { name: 'cached_nodes', keyField: 'id' }, // --- 新增 ---
             ];
             const keys = [];
 
@@ -173,6 +201,11 @@ class D1StorageAdapter {
             return { table: 'profiles', queryField: 'id', queryValue: 'main' };
         } else if (key === DATA_KEYS.SETTINGS) {
             return { table: 'settings', queryField: 'key', queryValue: 'main' };
+        // --- 新增 ---
+        } else if (key.startsWith(DATA_KEYS.CACHED_NODES_PREFIX)) {
+            const id = key.substring(DATA_KEYS.CACHED_NODES_PREFIX.length);
+            return { table: 'cached_nodes', queryField: 'id', queryValue: id };
+        // --- 结束新增 ---
         } else {
             // 处理其他格式的 key，默认作为 settings 表的 key，但记录警告
             console.warn(`[D1 Storage] Unknown key format: ${key}, treating as settings key`);
@@ -190,6 +223,10 @@ class D1StorageAdapter {
             return DATA_KEYS.PROFILES;
         } else if (table === 'settings' && keyValue === 'main') {
             return DATA_KEYS.SETTINGS;
+        // --- 新增 ---
+        } else if (table === 'cached_nodes') {
+            return `${DATA_KEYS.CACHED_NODES_PREFIX}${keyValue}`;
+        // --- 结束新增 ---
         } else {
             return keyValue;
         }
@@ -218,6 +255,9 @@ export class StorageFactory {
             
             case STORAGE_TYPES.KV:
             default:
+                if (!env.MISUB_KV) {
+                    throw new Error("[Storage] KV namespace 'MISUB_KV' is not bound. Please check your wrangler.toml or Pages dashboard.");
+                }
                 return new KVStorageAdapter(env.MISUB_KV);
         }
     }
@@ -244,13 +284,19 @@ export class StorageFactory {
 
             // 回退：从 KV 读取设置（默认仍支持 KV）
             let settings = null;
-            try {
-                settings = await env.MISUB_KV.get(DATA_KEYS.SETTINGS, 'json');
-            } catch (kvError) {
-                console.warn('[Storage] Failed to read from KV:', kvError.message);
-            }
-            if (settings?.storageType) {
-                return settings.storageType;
+            if (env.MISUB_KV) { // 检查KV是否存在
+                try {
+                    settings = await env.MISUB_KV.get(DATA_KEYS.SETTINGS, 'json');
+                } catch (kvError) {
+                    console.warn('[Storage] Failed to read from KV:', kvError.message);
+                }
+                if (settings?.storageType) {
+                    return settings.storageType;
+                }
+            } else if (!env.MISUB_DB) {
+                // 如果 KV 和 D1 都没有绑定，这是一个严重错误
+                console.error("[Storage] No MISUB_KV or MISUB_DB bound. Storage is non-functional.");
+                return STORAGE_TYPES.KV; // 返回默认值，但功能会受限
             }
 
             // 默认使用 KV
@@ -280,6 +326,7 @@ export class DataMigrator {
                 subscriptions: false,
                 profiles: false,
                 settings: false,
+                cachedNodes: false, // --- 新增 ---
                 errors: []
             };
 
@@ -317,6 +364,24 @@ export class DataMigrator {
             } catch (error) {
                 results.errors.push(`设置迁移失败: ${error.message}`);
             }
+
+            // --- 新增：迁移缓存的节点 ---
+            try {
+                // 注意：这里需要从KV获取原始键列表
+                const kvNodeKeysList = await env.MISUB_KV.list({ prefix: DATA_KEYS.CACHED_NODES_PREFIX });
+                const kvNodeKeys = kvNodeKeysList.keys || [];
+                
+                for (const key of kvNodeKeys) {
+                    const nodeData = await kvAdapter.get(key.name); // Adapter会处理'text'
+                    if (nodeData) {
+                        await d1Adapter.put(key.name, nodeData); // Adapter会处理'text'
+                    }
+                }
+                results.cachedNodes = true;
+            } catch (error) {
+                results.errors.push(`订阅节点缓存迁移失败: ${error.message}`);
+            }
+            // --- 结束新增 ---
 
             return results;
         } catch (error) {
