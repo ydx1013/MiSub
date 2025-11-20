@@ -116,89 +116,7 @@ async function conditionalKVPut(env, key, newData, oldData = null) {
     // --- 结束修改 ---
 }
 
-// {{ AURA-X: Add - 批量写入优化机制. Approval: 寸止(ID:1735459200). }}
-/**
- * 批量写入队列管理器
- */
-class BatchWriteManager {
-    constructor() {
-        this.writeQueue = new Map(); // key -> {data, timestamp, resolve, reject}
-        this.debounceTimers = new Map(); // key -> timerId
-        this.DEBOUNCE_DELAY = 1000; // 1秒防抖延迟
-    }
 
-    /**
-     * 添加写入任务到队列，使用防抖机制
-     * @param {Object} env - Cloudflare环境对象
-     * @param {string} key - KV键名
-     * @param {any} data - 要写入的数据
-     * @param {any} oldData - 旧数据（用于变更检测）
-     * @returns {Promise<boolean>} - 是否执行了写入
-     */
-    async queueWrite(env, key, data, oldData = null) {
-        return new Promise((resolve, reject) => {
-            // 清除之前的定时器
-            if (this.debounceTimers.has(key)) {
-                clearTimeout(this.debounceTimers.get(key));
-            }
-
-            // 更新队列中的数据
-            this.writeQueue.set(key, {
-                data,
-                oldData,
-                timestamp: Date.now(),
-                resolve,
-                reject
-            });
-
-            // 设置新的防抖定时器
-            const timerId = setTimeout(async () => {
-                await this.executeWrite(env, key);
-            }, this.DEBOUNCE_DELAY);
-
-            this.debounceTimers.set(key, timerId);
-        });
-    }
-
-    /**
-     * 执行实际的写入操作
-     * @param {Object} env - Cloudflare环境对象
-     * @param {string} key - KV键名
-     */
-    async executeWrite(env, key) {
-        const writeTask = this.writeQueue.get(key);
-        if (!writeTask) return;
-
-        // 清理定时器
-        if (this.debounceTimers.has(key)) {
-            clearTimeout(this.debounceTimers.get(key));
-            this.debounceTimers.delete(key);
-        }
-
-        try {
-            const wasWritten = await conditionalKVPut(env, key, writeTask.data, writeTask.oldData);
-            writeTask.resolve(wasWritten);
-        } catch (error) {
-            writeTask.reject(error);
-        } finally {
-            // 清理队列
-            this.writeQueue.delete(key);
-        }
-    }
-
-    /**
-     * 立即执行所有待写入的任务（用于紧急情况）
-     * @param {Object} env - Cloudflare环境对象
-     */
-    async flushAll(env) {
-        const keys = Array.from(this.writeQueue.keys());
-        const promises = keys.map(key => this.executeWrite(env, key));
-        await Promise.allSettled(promises);
-    }
-}
-
-// 全局批量写入管理器实例
-const batchWriteManager = new BatchWriteManager();
 
 /**
  * 获取存储适配器实例
@@ -488,10 +406,16 @@ async function handleCronTrigger(env) {
 
     let changesMade = false; // 跟踪是否有元数据（流量/节点数）变更
 
-    for (const sub of allSubs) {
-        if (sub.url.startsWith('http') && sub.enabled) {
+    // 过滤出需要更新的订阅
+    const subsToUpdate = allSubs.filter(sub => sub.url && sub.url.startsWith('http') && sub.enabled);
+    
+    // 并发控制：每次最多处理 5 个订阅
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < subsToUpdate.length; i += BATCH_SIZE) {
+        const batch = subsToUpdate.slice(i, i + BATCH_SIZE);
+        
+        await Promise.all(batch.map(async (sub) => {
             try {
-                // --- [!!! 核心修改 !!!] ---
                 // 调用新的统一函数来更新缓存和获取元数据
                 const updateResult = await updateSubscriptionCache(sub, storageAdapter);
                 
@@ -509,12 +433,10 @@ async function handleCronTrigger(env) {
                         changesMade = true;
                     }
                 }
-                // --- 结束修改 ---
-
             } catch(e) {
                 console.error(`Cron job failed for sub: ${sub.name || sub.url}`, e);
             }
-        }
+        }));
     }
 
     if (changesMade) {
@@ -792,9 +714,29 @@ async function handleApiRequest(request, env) {
                 // {{ AURA-X: Modify - 使用存储适配器保存数据. Approval: 寸止(ID:1735459200). }}
                 // 步骤6: 保存数据到存储（使用存储适配器）
                 try {
-                    // const storageAdapter = await getStorageAdapter(env); // --- [修改] 移动到前面 ---
+                    // --- [核心修改] 合并策略：读取现有数据，保留 userInfo 和 nodeCount ---
+                    const existingSubs = await storageAdapter.get(KV_KEY_SUBS) || [];
+                    
+                    // 创建一个 Map 以便快速查找现有订阅
+                    const existingSubsMap = new Map(existingSubs.map(sub => [sub.id, sub]));
+                    
+                    const mergedMisubs = misubs.map(newSub => {
+                        const existingSub = existingSubsMap.get(newSub.id);
+                        if (existingSub) {
+                            // 如果存在，保留现有的 userInfo 和 nodeCount (除非前端明确提供了非空值，这里假设前端传来的可能是旧的)
+                            // 实际上，前端传来的 userInfo 可能是旧的，所以我们优先使用后端存储的 userInfo
+                            // 只有当后端没有 userInfo 时，才使用前端的
+                            return {
+                                ...newSub,
+                                userInfo: existingSub.userInfo || newSub.userInfo,
+                                nodeCount: existingSub.nodeCount || newSub.nodeCount
+                            };
+                        }
+                        return newSub;
+                    });
+
                     await Promise.all([
-                        storageAdapter.put(KV_KEY_SUBS, misubs),
+                        storageAdapter.put(KV_KEY_SUBS, mergedMisubs),
                         storageAdapter.put(KV_KEY_PROFILES, profiles)
                     ]);
                 } catch (storageError) {
