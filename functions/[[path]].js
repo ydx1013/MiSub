@@ -301,9 +301,10 @@ ${additionalData}
  * 获取订阅内容、解析、并缓存节点列表
  * @param {object} sub - 订阅对象
  * @param {object} storageAdapter - 存储适配器
+ * @param {string} [subConverterUrl] - Subconverter 地址 (可选，用于解析复杂订阅)
  * @returns {Promise<{count: number, userInfo: object, success: boolean, error?: string}>}
  */
-async function updateSubscriptionCache(sub, storageAdapter) {
+async function updateSubscriptionCache(sub, storageAdapter, subConverterUrl = null) {
     const nodeRegex = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//gm;
     const result = { count: 0, userInfo: null, success: false };
 
@@ -319,8 +320,10 @@ async function updateSubscriptionCache(sub, storageAdapter) {
             redirect: "follow",
             cf: { insecureSkipVerify: true } 
         }));
+        
+        // [修改] 使用更通用的 UA 以避免被屏蔽
         const nodeCountRequest = fetch(new Request(sub.url, { 
-            headers: { 'User-Agent': 'MiSub-Cron-Updater/1.0' }, 
+            headers: { 'User-Agent': 'v2rayN/6.45' }, 
             redirect: "follow",
             cf: { insecureSkipVerify: true } 
         }));
@@ -359,9 +362,37 @@ async function updateSubscriptionCache(sub, storageAdapter) {
             }
             
             // 提取所有节点
-            const allNodes = decoded.replace(/\r\n/g, '\n').split('\n')
+            let allNodes = decoded.replace(/\r\n/g, '\n').split('\n')
                 .map(line => line.trim())
                 .filter(line => /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//.test(line));
+
+            // [新增] 如果简单解析失败且提供了 Subconverter，尝试使用 Subconverter 解析
+            if (allNodes.length === 0 && subConverterUrl) {
+                try {
+                    console.log(`[Cache Update] Simple parsing failed for ${sub.name}, trying Subconverter...`);
+                    const subUrl = new URL(`https://${subConverterUrl}/sub`);
+                    subUrl.searchParams.set('target', 'base64');
+                    subUrl.searchParams.set('url', sub.url);
+                    
+                    const subResponse = await fetch(subUrl.toString(), {
+                        headers: { 'User-Agent': 'MiSub-Backend/1.0' }
+                    });
+                    
+                    if (subResponse.ok) {
+                        const subText = await subResponse.text();
+                        try {
+                            const subDecoded = atob(subText.replace(/\s/g, ''));
+                            allNodes = subDecoded.replace(/\r\n/g, '\n').split('\n')
+                                .map(line => line.trim())
+                                .filter(line => /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//.test(line));
+                        } catch (e) {
+                            console.warn(`[Cache Update] Subconverter returned invalid base64 for ${sub.name}`);
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`[Cache Update] Subconverter fallback failed for ${sub.name}: ${e.message}`);
+                }
+            }
 
             if (allNodes.length > 0) {
                 result.count = allNodes.length; // 更新节点数量
@@ -418,7 +449,8 @@ async function handleCronTrigger(env) {
         await Promise.all(batch.map(async (sub) => {
             try {
                 // 调用新的统一函数来更新缓存和获取元数据
-                const updateResult = await updateSubscriptionCache(sub, storageAdapter);
+                // [修改] 传入 subConverter 地址
+                const updateResult = await updateSubscriptionCache(sub, storageAdapter, settings.subConverter);
                 
                 if (updateResult.success) {
                     // 检查流量信息是否有变化
@@ -1312,7 +1344,8 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
             if (!text && profile === null) {
                 try {
                     // 尝试实时更新缓存
-                    const updateResult = await updateSubscriptionCache(sub, storageAdapter);
+                    // [修改] 传入 subConverter 地址
+                    const updateResult = await updateSubscriptionCache(sub, storageAdapter, config.subConverter);
                     if (updateResult.success) {
                         // 更新成功，重新读取缓存
                         text = await storageAdapter.get(`${KV_KEY_CACHED_NODES_PREFIX}${sub.id}`);
@@ -1482,7 +1515,8 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                 : validNodes.join('\n');
         } catch (e) { 
             // 订阅处理错误，生成错误节点
-            const errorNodeName = `[${sub.name || '未知'}]-缓存读取失败`;
+            // [修改] 包含具体错误信息以便调试
+            const errorNodeName = `[${sub.name || '未知'}]-缓存读取失败: ${e.message}`;
             return `trojan://error@127.0.0.1:8888?security=tls&allowInsecure=1&type=tcp#${encodeURIComponent(errorNodeName)}`;
         }
     });
