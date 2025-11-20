@@ -153,13 +153,14 @@ const selectSubscriptionForNodes = async (sub) => {
 };
 
 const fetchNodes = async (sub) => {
-  if (!sub.url) return;
+  if (!sub.id) return;
   loadingNodes.value[sub.id] = true;
   try {
-    const response = await fetch('/api/fetch_external_url', {
+    // Use cached nodes instead of fetching external URL
+    const response = await fetch('/api/get_cached_nodes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: sub.url })
+      body: JSON.stringify({ id: sub.id })
     });
     if (!response.ok) throw new Error('Fetch failed');
     

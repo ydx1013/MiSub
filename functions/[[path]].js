@@ -889,6 +889,76 @@ async function handleApiRequest(request, env) {
             }
         }
 
+        // [New Endpoint] Get cached nodes for a subscription
+        case '/get_cached_nodes': {
+            if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+            if (!await authMiddleware(request, env)) {
+                return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+            }
+            
+            try {
+                const { id } = await request.json();
+                if (!id) return new Response(JSON.stringify({ error: 'Missing subscription ID' }), { status: 400 });
+
+                const storageAdapter = await getStorageAdapter(env);
+                const cachedContent = await storageAdapter.get(`${KV_KEY_CACHED_NODES_PREFIX}${id}`);
+
+                if (!cachedContent) {
+                    return new Response(JSON.stringify({ nodes: [], message: 'No cache found' }), { headers: { 'Content-Type': 'application/json' } });
+                }
+
+                // Parse cached content (Reuse logic from fetch_external_url)
+                let processedText = cachedContent;
+                try {
+                    const cleanedText = cachedContent.replace(/\s/g, '');
+                    if (isValidBase64(cleanedText)) {
+                        const binaryString = atob(cleanedText);
+                        const bytes = new Uint8Array(binaryString.length);
+                        for (let i = 0; i < binaryString.length; i++) { bytes[i] = binaryString.charCodeAt(i); }
+                        processedText = new TextDecoder('utf-8').decode(bytes);
+                    }
+                } catch (e) {
+                    // Base64 decode failed, use original text
+                }
+
+                // Extract nodes
+                const nodes = [];
+                const lines = processedText.replace(/\r\n/g, '\n').split('\n');
+                
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed) continue;
+                    if (/^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//.test(trimmed)) {
+                        // Extract name
+                        let name = 'Unknown';
+                        const hashIndex = trimmed.indexOf('#');
+                        if (hashIndex !== -1) {
+                            try {
+                                name = decodeURIComponent(trimmed.substring(hashIndex + 1));
+                            } catch (e) {
+                                name = trimmed.substring(hashIndex + 1);
+                            }
+                        } else {
+                            // Try to parse JSON for vmess
+                            if (trimmed.startsWith('vmess://')) {
+                                try {
+                                    const base64 = trimmed.substring(8);
+                                    const json = JSON.parse(atob(base64));
+                                    if (json.ps) name = json.ps;
+                                } catch (e) {}
+                            }
+                        }
+                        nodes.push({ name, original: trimmed });
+                    }
+                }
+
+                return new Response(JSON.stringify({ nodes }), { headers: { 'Content-Type': 'application/json' } });
+
+            } catch (error) {
+                return new Response(JSON.stringify({ error: `Failed to get cached nodes: ${error.message}` }), { status: 500 });
+            }
+        }
+
         // {{ AURA-X: Add - 批量节点更新API端点. Approval: 寸止(ID:1735459200). }}
         case '/batch_update_nodes': {
             if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
