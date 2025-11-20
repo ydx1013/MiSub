@@ -15,6 +15,9 @@ const emit = defineEmits(['update:show', 'save']);
 const localProfile = ref({});
 const subscriptionSearchTerm = ref('');
 const nodeSearchTerm = ref('');
+const subscriptionNodes = ref({}); // { subId: [{ name: 'Node 1', original: '...' }, ...] }
+const loadingNodes = ref({}); // { subId: true/false }
+const expandedSubscriptions = ref({}); // { subId: true/false }
 
 // 国家/地区代码到旗帜和中文名称的映射
 const countryCodeMap = {
@@ -120,6 +123,136 @@ const filteredManualNodes = computed(() => {
   });
 });
 
+const toggleSubscriptionExpand = async (sub) => {
+  expandedSubscriptions.value[sub.id] = !expandedSubscriptions.value[sub.id];
+  if (expandedSubscriptions.value[sub.id] && !subscriptionNodes.value[sub.id]) {
+    await fetchNodes(sub);
+  }
+};
+
+const fetchNodes = async (sub) => {
+  if (!sub.url) return;
+  loadingNodes.value[sub.id] = true;
+  try {
+    const response = await fetch('/api/fetch_external_url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: sub.url })
+    });
+    if (!response.ok) throw new Error('Fetch failed');
+    const text = await response.text();
+    
+    // Parse nodes
+    let decodedText = text;
+    try {
+        const cleanedText = text.replace(/\s/g, '');
+        if (/^[A-Za-z0-9+/]*={0,2}$/.test(cleanedText)) {
+             const binaryString = atob(cleanedText);
+             const bytes = new Uint8Array(binaryString.length);
+             for (let i = 0; i < binaryString.length; i++) { bytes[i] = binaryString.charCodeAt(i); }
+             decodedText = new TextDecoder('utf-8').decode(bytes);
+        }
+    } catch (e) {
+        // Ignore base64 error
+    }
+
+    const lines = decodedText.split(/[\r\n]+/);
+    const nodes = [];
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (/^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//.test(trimmed)) {
+            // Extract name
+            let name = 'Unknown';
+            const hashIndex = trimmed.indexOf('#');
+            if (hashIndex !== -1) {
+                try {
+                    name = decodeURIComponent(trimmed.substring(hashIndex + 1));
+                } catch (e) {
+                    name = trimmed.substring(hashIndex + 1);
+                }
+            } else {
+                // Try to parse JSON for vmess
+                if (trimmed.startsWith('vmess://')) {
+                    try {
+                        const base64 = trimmed.substring(8);
+                        const json = JSON.parse(atob(base64));
+                        if (json.ps) name = json.ps;
+                    } catch (e) {}
+                }
+            }
+            nodes.push({ name, original: trimmed });
+        }
+    }
+    subscriptionNodes.value[sub.id] = nodes;
+  } catch (error) {
+    console.error('Failed to fetch nodes', error);
+    subscriptionNodes.value[sub.id] = []; // Error state
+  } finally {
+    loadingNodes.value[sub.id] = false;
+  }
+};
+
+const isNodeSelected = (subId, nodeName) => {
+    const filters = localProfile.value.nodeFilters?.[subId];
+    if (!filters) return true; // Default include all (no filter means include all)
+    
+    if (filters.mode === 'exclude') {
+        return !filters.list.includes(nodeName);
+    } else if (filters.mode === 'include') {
+        return filters.list.includes(nodeName);
+    }
+    return true;
+};
+
+const toggleNodeSelection = (subId, nodeName) => {
+    if (!localProfile.value.nodeFilters) localProfile.value.nodeFilters = {};
+    
+    // Initialize if not exists. Default to 'exclude' mode (blacklist)
+    if (!localProfile.value.nodeFilters[subId]) {
+        localProfile.value.nodeFilters[subId] = { mode: 'exclude', list: [] };
+    }
+    
+    const filters = localProfile.value.nodeFilters[subId];
+    
+    if (filters.mode === 'exclude') {
+        // In exclude mode:
+        // If currently selected (not in list), we want to deselect (add to list)
+        // If currently deselected (in list), we want to select (remove from list)
+        const index = filters.list.indexOf(nodeName);
+        if (index === -1) {
+            filters.list.push(nodeName); // Exclude it
+        } else {
+            filters.list.splice(index, 1); // Include it (remove from exclude list)
+        }
+    } else {
+        // In include mode:
+        // If currently selected (in list), we want to deselect (remove from list)
+        // If currently deselected (not in list), we want to select (add to list)
+        const index = filters.list.indexOf(nodeName);
+        if (index === -1) {
+            filters.list.push(nodeName); // Include it
+        } else {
+            filters.list.splice(index, 1); // Exclude it (remove from include list)
+        }
+    }
+};
+
+const toggleFilterMode = (subId) => {
+    if (!localProfile.value.nodeFilters) localProfile.value.nodeFilters = {};
+    if (!localProfile.value.nodeFilters[subId]) {
+        localProfile.value.nodeFilters[subId] = { mode: 'include', list: [] }; // Switch to include (whitelist) empty = none
+    } else {
+        const filters = localProfile.value.nodeFilters[subId];
+        // Toggle mode
+        filters.mode = filters.mode === 'exclude' ? 'include' : 'exclude';
+        // Reset list when switching modes? Or try to invert?
+        // Inverting is hard because we need the full list of nodes.
+        // Let's just reset list for simplicity or keep it empty.
+        filters.list = [];
+    }
+};
+
 watch(() => props.profile, (newProfile) => {
   if (newProfile) {
     const profileCopy = JSON.parse(JSON.stringify(newProfile));
@@ -140,6 +273,10 @@ watch(() => props.profile, (newProfile) => {
         manualNodePrefix: ''
       };
     }
+    // 初始化节点筛选设置
+    if (!profileCopy.nodeFilters) {
+      profileCopy.nodeFilters = {}; // { subId: { mode: 'exclude'|'include', rules: ['keyword1', 'keyword2'] } }
+    }
     localProfile.value = profileCopy;
   } else {
     localProfile.value = { 
@@ -153,7 +290,8 @@ watch(() => props.profile, (newProfile) => {
         enableManualNodes: null,
         enableSubscriptions: null,
         manualNodePrefix: ''
-      }
+      },
+      nodeFilters: {}
     };
   }
 }, { deep: true, immediate: true });
@@ -340,16 +478,90 @@ const handleDeselectAll = (listName, sourceArray) => {
                 <svg class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
               </div>
               <div class="overflow-y-auto space-y-2 p-3 bg-gray-50 dark:bg-gray-900/50 rounded-lg border dark:border-gray-700 h-48">
-                <div v-for="sub in filteredSubscriptions" :key="sub.id">
-                  <label class="flex items-center space-x-3 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      :checked="localProfile.subscriptions?.includes(sub.id)"
-                      @change="toggleSelection('subscriptions', sub.id)"
-                      class="h-4 w-4 rounded-sm border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                    />
-                    <span class="text-sm text-gray-800 dark:text-gray-200 truncate" :title="sub.name">{{ sub.name || '未命名订阅' }}</span>
-                  </label>
+                <div v-for="sub in filteredSubscriptions" :key="sub.id" class="border-b border-gray-100 dark:border-gray-700 last:border-0 pb-2 mb-2 last:pb-0 last:mb-0">
+                  <div class="flex items-center justify-between">
+                    <label class="flex items-center space-x-3 cursor-pointer flex-1">
+                      <input
+                        type="checkbox"
+                        :checked="localProfile.subscriptions?.includes(sub.id)"
+                        @change="toggleSelection('subscriptions', sub.id)"
+                        class="h-4 w-4 rounded-sm border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <span class="text-sm text-gray-800 dark:text-gray-200 truncate" :title="sub.name">{{ sub.name || '未命名订阅' }}</span>
+                    </label>
+                    <button 
+                        v-if="localProfile.subscriptions?.includes(sub.id)"
+                        @click.stop="toggleSubscriptionExpand(sub)" 
+                        class="text-xs text-gray-500 hover:text-indigo-600 px-2 py-1"
+                    >
+                        {{ expandedSubscriptions[sub.id] ? '收起节点' : '选择节点' }}
+                    </button>
+                  </div>
+
+                  <!-- 节点选择区域 -->
+                  <div v-if="expandedSubscriptions[sub.id] && localProfile.subscriptions?.includes(sub.id)" class="mt-2 ml-7 space-y-2">
+                    <div v-if="loadingNodes[sub.id]" class="text-xs text-gray-500 animate-pulse">
+                      正在加载节点列表...
+                    </div>
+                    <div v-else-if="!subscriptionNodes[sub.id] || subscriptionNodes[sub.id].length === 0" class="text-xs text-gray-500">
+                      未找到节点或解析失败
+                    </div>
+                    <div v-else class="space-y-1">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-xs text-gray-500">
+                                {{ localProfile.nodeFilters?.[sub.id]?.mode === 'include' ? '仅包含选中' : '排除选中' }}
+                                ({{ subscriptionNodes[sub.id].length }}个节点)
+                            </span>
+                            <button 
+                                @click="toggleFilterMode(sub.id)" 
+                                class="text-xs text-indigo-600 hover:underline"
+                            >
+                                切换模式: {{ localProfile.nodeFilters?.[sub.id]?.mode === 'include' ? '白名单' : '黑名单' }}
+                            </button>
+                        </div>
+                        <div class="max-h-40 overflow-y-auto pr-2 space-y-1 custom-scrollbar">
+                            <div v-for="(node, idx) in subscriptionNodes[sub.id]" :key="idx" class="flex items-center space-x-2">
+                                <input 
+                                    type="checkbox" 
+                                    :id="`node-${sub.id}-${idx}`"
+                                    :checked="isNodeSelected(sub.id, node.name)"
+                                    @change="toggleNodeSelection(sub.id, node.name)"
+                                    class="h-3 w-3 rounded-sm border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                >
+                                <label :for="`node-${sub.id}-${idx}`" class="text-xs text-gray-600 dark:text-gray-400 truncate cursor-pointer select-none" :title="node.name">
+                                    {{ node.name }}
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                  </div>
+
+                  <!-- 订阅节点选择部分 -->
+                  <div v-if="expandedSubscriptions[sub.id]" class="mt-2 ml-6">
+                    <div v-if="loadingNodes[sub.id]" class="text-gray-500 text-sm py-2">
+                      加载节点...
+                    </div>
+                    <div v-else-if="subscriptionNodes[sub.id]?.length === 0" class="text-gray-500 text-sm py-2">
+                      没有找到可用节点。
+                    </div>
+                    <div v-else>
+                      <div v-for="node in subscriptionNodes[sub.id]" :key="node.original" class="flex items-center space-x-3 py-2">
+                        <input
+                          type="checkbox"
+                          :checked="isNodeSelected(sub.id, node.name)"
+                          @change="toggleNodeSelection(sub.id, node.name)"
+                          class="h-4 w-4 rounded-sm border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span class="text-sm text-gray-800 dark:text-gray-200" :title="node.original">{{ node.name }}</span>
+                      </div>
+                      <div class="flex items-center mt-2">
+                        <button @click="toggleFilterMode(sub.id)" class="text-xs rounded-md px-3 py-1" 
+                          :class="localProfile.nodeFilters[sub.id]?.mode === 'exclude' ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-800'">
+                          {{ localProfile.nodeFilters[sub.id]?.mode === 'exclude' ? '反向选择' : '恢复默认' }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
                 <div v-if="filteredSubscriptions.length === 0" class="text-center text-gray-500 text-sm py-4">
                   没有找到匹配的订阅。

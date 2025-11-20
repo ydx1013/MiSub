@@ -606,7 +606,6 @@ async function handleApiRequest(request, env) {
             return new Response(JSON.stringify({ success: false, message: `迁移失败: ${e.message}` }), { status: 500 });
         }
     }
-
     if (path === '/login') {
         if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
         try {
@@ -817,6 +816,9 @@ async function handleApiRequest(request, env) {
 
         case '/fetch_external_url': { // New case
             if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+            if (!await authMiddleware(request, env)) {
+                return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+            }
             const { url: externalUrl } = await request.json();
             if (!externalUrl || typeof externalUrl !== 'string' || !/^https?:\/\//.test(externalUrl)) {
                 return new Response(JSON.stringify({ error: 'Invalid or missing url' }), { status: 400 });
@@ -1132,17 +1134,17 @@ function getProcessedUserAgent(originalUserAgent, url = '') {
 
 // --- [!!! 核心修改 !!!] ---
 // --- 节点列表生成函数 (读取缓存) ---
-async function generateCombinedNodeList(context, config, userAgent, misubs, prependedContent = '', profilePrefixSettings = null) {
+async function generateCombinedNodeList(context, config, userAgent, misubs, prependedContent = '', profile = null) {
     const { env } = context;
     const storageAdapter = await getStorageAdapter(env); // 获取存储适配器
 
     // 判断是否启用手动节点前缀
-    const shouldPrependManualNodes = profilePrefixSettings?.enableManualNodes ?? 
+    const shouldPrependManualNodes = profile?.prefixSettings?.enableManualNodes ?? 
         config.prefixConfig?.enableManualNodes ?? 
         config.prependSubName ?? true;
     
     // 手动节点前缀文本
-    const manualNodePrefix = profilePrefixSettings?.manualNodePrefix ?? 
+    const manualNodePrefix = profile?.prefixSettings?.manualNodePrefix ?? 
         config.prefixConfig?.manualNodePrefix ?? 
         '手动节点';
     
@@ -1198,6 +1200,40 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
             let validNodes = text.replace(/\r\n/g, '\n').split('\n')
                 .map(line => line.trim())
                 .filter(Boolean); // 过滤空行
+
+            // [New Logic] Apply Node Filters from Profile
+            if (profile && profile.nodeFilters && profile.nodeFilters[sub.id]) {
+                const filter = profile.nodeFilters[sub.id];
+                if (filter.mode === 'exclude') {
+                    validNodes = validNodes.filter(nodeLink => {
+                        const hashIndex = nodeLink.lastIndexOf('#');
+                        let nodeName = '';
+                        if (hashIndex !== -1) {
+                            try {
+                                nodeName = decodeURIComponent(nodeLink.substring(hashIndex + 1));
+                            } catch (e) {
+                                nodeName = nodeLink.substring(hashIndex + 1);
+                            }
+                        }
+                        // If name is in the list, exclude it
+                        return !filter.list.includes(nodeName);
+                    });
+                } else if (filter.mode === 'include') {
+                    validNodes = validNodes.filter(nodeLink => {
+                        const hashIndex = nodeLink.lastIndexOf('#');
+                        let nodeName = '';
+                        if (hashIndex !== -1) {
+                            try {
+                                nodeName = decodeURIComponent(nodeLink.substring(hashIndex + 1));
+                            } catch (e) {
+                                nodeName = nodeLink.substring(hashIndex + 1);
+                            }
+                        }
+                        // If name is in the list, include it
+                        return filter.list.includes(nodeName);
+                    });
+                }
+            }
 
             // [核心重構] 引入白名單 (keep:) 和黑名單 (exclude) 模式
             if (sub.exclude && sub.exclude.trim() !== '') {
@@ -1276,7 +1312,7 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                                     if (nameRegex.test(nodeName)) {
                                         return false;
                                     }
-                                } catch (e) { /* 忽略解碼錯誤 */ }
+                                } catch (e) { /* 忽略解码错误 */ }
                             }
                             // 修复：对于vmess协议，需要特殊处理节点名称
                             else if (protocol === 'vmess') {
@@ -1525,7 +1561,7 @@ async function handleMisubRequest(context) {
         userAgentHeader, 
         targetMisubs, 
         prependedContentForSubconverter,
-        profileIdentifier ? allProfiles.find(p => (p.customId && p.customId === profileIdentifier) || p.id === profileIdentifier)?.prefixSettings : null
+        profileIdentifier ? allProfiles.find(p => (p.customId && p.customId === profileIdentifier) || p.id === profileIdentifier) : null
     );
 
     if (targetFormat === 'base64') {
