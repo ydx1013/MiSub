@@ -1574,7 +1574,8 @@ async function handleMisubRequest(context) {
         if (!token || token !== config.mytoken) {
             return new Response('Invalid Token', { status: 403 });
         }
-        targetMisubs = allMisubs.filter(s => s.enabled);
+        // 管理员模式下导出所有节点（包括已禁用的）
+        targetMisubs = allMisubs;
         // [修正] 使用 config 變量
         effectiveSubConverter = config.subConverter;
         effectiveSubConfig = config.subConfig;
