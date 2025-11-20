@@ -140,51 +140,11 @@ const fetchNodes = async (sub) => {
       body: JSON.stringify({ url: sub.url })
     });
     if (!response.ok) throw new Error('Fetch failed');
-    const text = await response.text();
     
-    // Parse nodes
-    let decodedText = text;
-    try {
-        const cleanedText = text.replace(/\s/g, '');
-        if (/^[A-Za-z0-9+/]*={0,2}$/.test(cleanedText)) {
-             const binaryString = atob(cleanedText);
-             const bytes = new Uint8Array(binaryString.length);
-             for (let i = 0; i < binaryString.length; i++) { bytes[i] = binaryString.charCodeAt(i); }
-             decodedText = new TextDecoder('utf-8').decode(bytes);
-        }
-    } catch (e) {
-        // Ignore base64 error
-    }
-
-    const lines = decodedText.split(/[\r\n]+/);
-    const nodes = [];
-    for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        if (/^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//.test(trimmed)) {
-            // Extract name
-            let name = 'Unknown';
-            const hashIndex = trimmed.indexOf('#');
-            if (hashIndex !== -1) {
-                try {
-                    name = decodeURIComponent(trimmed.substring(hashIndex + 1));
-                } catch (e) {
-                    name = trimmed.substring(hashIndex + 1);
-                }
-            } else {
-                // Try to parse JSON for vmess
-                if (trimmed.startsWith('vmess://')) {
-                    try {
-                        const base64 = trimmed.substring(8);
-                        const json = JSON.parse(atob(base64));
-                        if (json.ps) name = json.ps;
-                    } catch (e) {}
-                }
-            }
-            nodes.push({ name, original: trimmed });
-        }
-    }
-    subscriptionNodes.value[sub.id] = nodes;
+    const data = await response.json();
+    if (data.error) throw new Error(data.error);
+    
+    subscriptionNodes.value[sub.id] = data.nodes || [];
   } catch (error) {
     console.error('Failed to fetch nodes', error);
     subscriptionNodes.value[sub.id] = []; // Error state

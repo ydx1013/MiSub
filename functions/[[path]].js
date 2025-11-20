@@ -835,8 +835,54 @@ async function handleApiRequest(request, env) {
                     return new Response(JSON.stringify({ error: `Failed to fetch external URL: ${response.status} ${response.statusText}` }), { status: response.status });
                 }
 
-                const content = await response.text();
-                return new Response(content, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+                const text = await response.text();
+                
+                // --- Server-side Parsing Logic (Reusing debug_subscription logic) ---
+                let processedText = text;
+                try {
+                    const cleanedText = text.replace(/\s/g, '');
+                    if (isValidBase64(cleanedText)) {
+                        const binaryString = atob(cleanedText);
+                        const bytes = new Uint8Array(binaryString.length);
+                        for (let i = 0; i < binaryString.length; i++) { bytes[i] = binaryString.charCodeAt(i); }
+                        processedText = new TextDecoder('utf-8').decode(bytes);
+                    }
+                } catch (e) {
+                    // Base64 decode failed, use original text
+                }
+
+                // Extract nodes
+                const nodes = [];
+                const lines = processedText.replace(/\r\n/g, '\n').split('\n');
+                
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed) continue;
+                    if (/^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//.test(trimmed)) {
+                        // Extract name
+                        let name = 'Unknown';
+                        const hashIndex = trimmed.indexOf('#');
+                        if (hashIndex !== -1) {
+                            try {
+                                name = decodeURIComponent(trimmed.substring(hashIndex + 1));
+                            } catch (e) {
+                                name = trimmed.substring(hashIndex + 1);
+                            }
+                        } else {
+                            // Try to parse JSON for vmess
+                            if (trimmed.startsWith('vmess://')) {
+                                try {
+                                    const base64 = trimmed.substring(8);
+                                    const json = JSON.parse(atob(base64));
+                                    if (json.ps) name = json.ps;
+                                } catch (e) {}
+                            }
+                        }
+                        nodes.push({ name, original: trimmed });
+                    }
+                }
+
+                return new Response(JSON.stringify({ nodes }), { headers: { 'Content-Type': 'application/json' } });
 
             } catch (e) {
                 return new Response(JSON.stringify({ error: `Failed to fetch external URL: ${e.message}` }), { status: 500 });
