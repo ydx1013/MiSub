@@ -1240,11 +1240,23 @@ function prependNodeName(link, prefix) {
       const jsonString = new TextDecoder('utf-8').decode(bytes);
       const nodeConfig = JSON.parse(jsonString);
       const originalPs = nodeConfig.ps || '';
+      
+      // [修改] 检查是否已经包含前缀，避免重复添加
       if (!originalPs.startsWith(prefix)) {
         nodeConfig.ps = originalPs ? `${prefix} - ${originalPs}` : prefix;
+      } else {
+        return link; // 已经包含前缀，直接返回原始链接
       }
+      
       const newJsonString = JSON.stringify(nodeConfig);
-      const newBase64Part = btoa(unescape(encodeURIComponent(newJsonString)));
+      // [修改] 使用更标准的 Base64 编码方式，不使用 unescape/encodeURIComponent
+      // 因为 TextDecoder 已经处理了 UTF-8，这里只需要重新编码为 UTF-8 字节流再转 Base64
+      const newBytes = new TextEncoder().encode(newJsonString);
+      let binary = '';
+      for (let i = 0; i < newBytes.length; i++) {
+          binary += String.fromCharCode(newBytes[i]);
+      }
+      const newBase64Part = btoa(binary);
       return 'vmess://' + newBase64Part;
     } catch (e) {
       console.error("为 vmess 节点添加名称前缀失败，将回退到通用方法。", e);
@@ -1510,9 +1522,25 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                 config.prefixConfig?.enableSubscriptions ?? 
                 config.prependSubName ?? true;
             
-            return (shouldPrependSubscriptions && sub.name)
-                ? validNodes.map(node => prependNodeName(node, sub.name)).join('\n')
-                : validNodes.join('\n');
+            // [修改] 确保 sub.name 存在且不为空时才添加前缀
+            // 并且如果节点名称已经包含了订阅名称，则不再重复添加
+            if (shouldPrependSubscriptions && sub.name && sub.name.trim() !== '') {
+                return validNodes.map(node => {
+                    // 检查节点名称是否已经包含前缀
+                    const hashIndex = node.lastIndexOf('#');
+                    if (hashIndex !== -1) {
+                        try {
+                            const nodeName = decodeURIComponent(node.substring(hashIndex + 1));
+                            if (nodeName.startsWith(sub.name)) {
+                                return node; // 已经包含前缀，直接返回
+                            }
+                        } catch (e) { /* 忽略解码错误 */ }
+                    }
+                    return prependNodeName(node, sub.name);
+                }).join('\n');
+            } else {
+                return validNodes.join('\n');
+            }
         } catch (e) { 
             // 订阅处理错误，生成错误节点
             // [修改] 包含具体错误信息以便调试
