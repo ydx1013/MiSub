@@ -323,7 +323,7 @@ async function updateSubscriptionCache(sub, storageAdapter, subConverterUrl = nu
         
         // [修改] 使用更通用的 UA 以避免被屏蔽
         const nodeCountRequest = fetch(new Request(sub.url, { 
-            headers: { 'User-Agent': 'v2rayN/6.45' }, 
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }, 
             redirect: "follow",
             cf: { insecureSkipVerify: true } 
         }));
@@ -1518,9 +1518,10 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
             }
             
             // 判断是否启用订阅前缀
-            const shouldPrependSubscriptions = profile?.prefixSettings?.enableSubscriptions ?? 
-                config.prefixConfig?.enableSubscriptions ?? 
-                config.prependSubName ?? true;
+            // [修改] 管理员模式下 (profile === null) 默认不添加前缀，保持节点原名
+            const shouldPrependSubscriptions = profile 
+                ? (profile.prefixSettings?.enableSubscriptions ?? config.prefixConfig?.enableSubscriptions ?? config.prependSubName ?? true)
+                : false;
             
             // [修改] 确保 sub.name 存在且不为空时才添加前缀
             // 并且如果节点名称已经包含了订阅名称，则不再重复添加
