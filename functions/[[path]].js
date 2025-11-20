@@ -1506,7 +1506,7 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
             }
             
             // 判断是否启用订阅前缀
-            const shouldPrependSubscriptions = profilePrefixSettings?.enableSubscriptions ?? 
+            const shouldPrependSubscriptions = profile?.prefixSettings?.enableSubscriptions ?? 
                 config.prefixConfig?.enableSubscriptions ?? 
                 config.prependSubName ?? true;
             
