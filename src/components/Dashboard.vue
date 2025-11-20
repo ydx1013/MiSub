@@ -20,7 +20,7 @@ import StatusIndicator from './StatusIndicator.vue';
 const SettingsModal = defineAsyncComponent(() => import('./SettingsModal.vue'));
 const BulkImportModal = defineAsyncComponent(() => import('./BulkImportModal.vue'));
 const ProfileModal = defineAsyncComponent(() => import('./ProfileModal.vue'));
-const SubscriptionImportModal = defineAsyncComponent(() => import('./SubscriptionImportModal.vue'));
+// const SubscriptionImportModal = defineAsyncComponent(() => import('./SubscriptionImportModal.vue'));
 
 // --- 基礎 Props 和狀態 ---
 const props = defineProps({ data: Object });
@@ -70,7 +70,7 @@ const showNodeModal = ref(false);
 const showBulkImportModal = ref(false);
 const showDeleteSubsModal = ref(false);
 const showDeleteNodesModal = ref(false);
-const showSubscriptionImportModal = ref(false);
+// const showSubscriptionImportModal = ref(false);
 // --- 初始化與生命週期 ---
 const initializeState = () => {
   isLoading.value = true;
@@ -262,7 +262,13 @@ const handleBulkImport = (importText) => {
   }
   if (newSubs.length > 0) addSubscriptionsFromBulk(newSubs);
   if (newNodes.length > 0) addNodesFromBulk(newNodes);
-  showToast(`成功导入 ${newSubs.length} 条订阅和 ${newNodes.length} 个手动节点，请点击保存`, 'success');
+  
+  let message = '成功导入 ';
+  if (newSubs.length > 0) message += `${newSubs.length} 条订阅 `;
+  if (newNodes.length > 0) message += `${newNodes.length} 个节点`;
+  if (newSubs.length === 0 && newNodes.length === 0) message = '未识别到有效的订阅或节点链接';
+  
+  showToast(message, newSubs.length > 0 || newNodes.length > 0 ? 'success' : 'info');
 };
 const handleAddSubscription = () => {
   isNewSubscription.value = true;
@@ -348,7 +354,7 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
         </span>
       </div>
       <div class="flex items-center gap-2">
-        <button @click="showBulkImportModal = true" class="text-sm font-semibold px-4 py-2 rounded-lg text-indigo-600 dark:text-indigo-400 border-2 border-indigo-500/50 hover:bg-indigo-500/10 transition-colors">批量导入</button>
+        <button @click="showBulkImportModal = true" class="text-sm font-semibold px-4 py-2 rounded-lg text-indigo-600 dark:text-indigo-400 border-2 border-indigo-500/50 hover:bg-indigo-500/10 transition-colors">添加资源</button>
       </div>
     </div>
 
@@ -383,7 +389,7 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
           :current-page="subsCurrentPage"
           :total-pages="subsTotalPages"
           :is-sorting="isSortingSubs"
-          @add="handleAddSubscription"
+          @add="showBulkImportModal = true"
           @delete="handleDeleteSubscriptionWithCleanup"
           @change-page="changeSubsPage"
           @update-node-count="handleUpdateNodeCount"
@@ -402,7 +408,7 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
           :is-sorting="isSortingNodes"
           :search-term="searchTerm"
           :view-mode="manualNodeViewMode"
-          @add="handleAddNode"
+          @add="showBulkImportModal = true"
           @delete="handleDeleteNodeWithCleanup"
           @edit="handleEditNode"
           @change-page="changeManualNodesPage"
@@ -412,7 +418,7 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
           @mark-dirty="markDirty"
           @auto-sort="handleAutoSortNodes"
           @deduplicate="handleDeduplicateNodes"
-          @import="showSubscriptionImportModal = true"
+          @import="showBulkImportModal = true"
           @delete-all="showDeleteNodesModal = true"
         />
       </div>
@@ -476,7 +482,6 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
     :export-backup="exportBackup"
     :import-backup="importBackup"
   />
-  <SubscriptionImportModal :show="showSubscriptionImportModal" @update:show="showSubscriptionImportModal = $event" :add-nodes-from-bulk="addNodesFromBulk" />
 </template>
 
 <style scoped>
