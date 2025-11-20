@@ -307,8 +307,9 @@ async function updateSubscriptionCache(sub, storageAdapter) {
     const nodeRegex = /^(ss|ssr|vmess|vless|trojan|hysteria2?|hy|hy2|tuic|anytls|socks5):\/\//gm;
     const result = { count: 0, userInfo: null, success: false };
 
-    if (!sub || !sub.url || !sub.url.startsWith('http') || !sub.enabled) {
-        return { ...result, error: 'Invalid or disabled subscription' };
+    // [修改] 移除 !sub.enabled 检查，允许强制更新禁用的订阅（由调用者控制）
+    if (!sub || !sub.url || !sub.url.startsWith('http')) {
+        return { ...result, error: 'Invalid subscription URL' };
     }
 
     try {
@@ -1304,7 +1305,22 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
     const subPromises = httpSubs.map(async (sub) => {
         try {
             // 1. 从存储中读取缓存的节点列表
-            const text = await storageAdapter.get(`${KV_KEY_CACHED_NODES_PREFIX}${sub.id}`);
+            let text = await storageAdapter.get(`${KV_KEY_CACHED_NODES_PREFIX}${sub.id}`);
+            
+            // [新增] 管理员模式下（profile === null），如果缓存缺失，尝试实时获取
+            // 这确保了即使订阅被禁用（导致 Cron 不更新），管理员也能看到节点
+            if (!text && profile === null) {
+                try {
+                    // 尝试实时更新缓存
+                    const updateResult = await updateSubscriptionCache(sub, storageAdapter);
+                    if (updateResult.success) {
+                        // 更新成功，重新读取缓存
+                        text = await storageAdapter.get(`${KV_KEY_CACHED_NODES_PREFIX}${sub.id}`);
+                    }
+                } catch (e) {
+                    console.error(`实时获取失败: ${sub.name}`, e);
+                }
+            }
             
             if (!text) {
                 // 如果没有缓存，返回一个错误节点
@@ -1352,7 +1368,8 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
             }
 
             // [核心重構] 引入白名單 (keep:) 和黑名單 (exclude) 模式
-            if (sub.exclude && sub.exclude.trim() !== '') {
+            // [修改] 仅在非管理员模式下应用排除规则，以便管理员查看所有节点
+            if (profile !== null && sub.exclude && sub.exclude.trim() !== '') {
                 const rules = sub.exclude.trim().split('\n').map(r => r.trim()).filter(Boolean);
                 
                 const keepRules = rules.filter(r => r.toLowerCase().startsWith('keep:'));
