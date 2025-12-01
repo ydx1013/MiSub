@@ -156,6 +156,16 @@ function migrateConfigSettings(config) {
     if (!migratedConfig.prefixConfig.hasOwnProperty('manualNodePrefix')) {
         migratedConfig.prefixConfig.manualNodePrefix = '手动节点';
     }
+
+    // 确保 suffixConfig 存在
+    if (!migratedConfig.suffixConfig) {
+        migratedConfig.suffixConfig = {
+            enableSubscriptions: false
+        };
+    }
+    if (!migratedConfig.suffixConfig.hasOwnProperty('enableSubscriptions')) {
+        migratedConfig.suffixConfig.enableSubscriptions = false;
+    }
     
     return migratedConfig;
 }
@@ -172,6 +182,9 @@ const defaultSettings = {
     enableManualNodes: true,    // 手动节点前缀开关
     enableSubscriptions: true,  // 机场订阅前缀开关
     manualNodePrefix: '手动节点', // 手动节点前缀文本
+  },
+  suffixConfig: {
+    enableSubscriptions: false, // 机场订阅后缀开关
   },
   NotifyThresholdDays: 3,
   NotifyThresholdPercent: 90,
@@ -1266,6 +1279,52 @@ function prependNodeName(link, prefix) {
   return appendToFragment(link, prefix);
 }
 
+function appendNodeName(link, suffix) {
+  if (!suffix) return link;
+  const appendToFragment = (baseLink, nameSuffix) => {
+    const hashIndex = baseLink.lastIndexOf('#');
+    const originalName = hashIndex !== -1 ? decodeURIComponent(baseLink.substring(hashIndex + 1)) : '';
+    const base = hashIndex !== -1 ? baseLink.substring(0, hashIndex) : baseLink;
+    if (originalName.endsWith(nameSuffix)) {
+        return baseLink;
+    }
+    const newName = originalName ? `${originalName} - ${nameSuffix}` : nameSuffix;
+    return `${base}#${encodeURIComponent(newName)}`;
+  }
+  if (link.startsWith('vmess://')) {
+    try {
+      const base64Part = link.substring('vmess://'.length);
+      const binaryString = atob(base64Part);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+      }
+      const jsonString = new TextDecoder('utf-8').decode(bytes);
+      const nodeConfig = JSON.parse(jsonString);
+      const originalPs = nodeConfig.ps || '';
+      
+      if (!originalPs.endsWith(suffix)) {
+        nodeConfig.ps = originalPs ? `${originalPs} - ${suffix}` : suffix;
+      } else {
+        return link;
+      }
+      
+      const newJsonString = JSON.stringify(nodeConfig);
+      const newBytes = new TextEncoder().encode(newJsonString);
+      let binary = '';
+      for (let i = 0; i < newBytes.length; i++) {
+          binary += String.fromCharCode(newBytes[i]);
+      }
+      const newBase64Part = btoa(binary);
+      return 'vmess://' + newBase64Part;
+    } catch (e) {
+      console.error("为 vmess 节点添加名称后缀失败，将回退到通用方法。", e);
+      return appendToFragment(link, suffix);
+    }
+  }
+  return appendToFragment(link, suffix);
+}
+
 /**
  * 检测字符串是否为有效的Base64格式
  * @param {string} str - 要检测的字符串
@@ -1522,11 +1581,18 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
             const shouldPrependSubscriptions = profile 
                 ? (profile.prefixSettings?.enableSubscriptions ?? config.prefixConfig?.enableSubscriptions ?? config.prependSubName ?? true)
                 : false;
+
+            // 判断是否启用订阅后缀
+            const shouldAppendSubscriptions = profile
+                ? (profile.suffixSettings?.enableSubscriptions ?? config.suffixConfig?.enableSubscriptions ?? false)
+                : false;
+            
+            let processedNodes = validNodes;
             
             // [修改] 确保 sub.name 存在且不为空时才添加前缀
             // 并且如果节点名称已经包含了订阅名称，则不再重复添加
             if (shouldPrependSubscriptions && sub.name && sub.name.trim() !== '') {
-                return validNodes.map(node => {
+                processedNodes = processedNodes.map(node => {
                     // 检查节点名称是否已经包含前缀
                     const hashIndex = node.lastIndexOf('#');
                     if (hashIndex !== -1) {
@@ -1538,10 +1604,27 @@ async function generateCombinedNodeList(context, config, userAgent, misubs, prep
                         } catch (e) { /* 忽略解码错误 */ }
                     }
                     return prependNodeName(node, sub.name);
-                }).join('\n');
-            } else {
-                return validNodes.join('\n');
+                });
             }
+
+            // [新增] 添加后缀逻辑
+            if (shouldAppendSubscriptions && sub.name && sub.name.trim() !== '') {
+                processedNodes = processedNodes.map(node => {
+                    // 检查节点名称是否已经包含后缀
+                    const hashIndex = node.lastIndexOf('#');
+                    if (hashIndex !== -1) {
+                        try {
+                            const nodeName = decodeURIComponent(node.substring(hashIndex + 1));
+                            if (nodeName.endsWith(sub.name)) {
+                                return node; // 已经包含后缀，直接返回
+                            }
+                        } catch (e) { /* 忽略解码错误 */ }
+                    }
+                    return appendNodeName(node, sub.name);
+                });
+            }
+
+            return processedNodes.join('\n');
         } catch (e) { 
             // 订阅处理错误，生成错误节点
             // [修改] 包含具体错误信息以便调试
@@ -1650,7 +1733,7 @@ async function handleMisubRequest(context) {
             return new Response('Profile not found or disabled', { status: 404 });
         }
     } else {
-        // [修正] 使用 config 變量
+        // [修正] 使用 config 变量
         if (!token || token !== config.mytoken) {
             return new Response('Invalid Token', { status: 403 });
         }

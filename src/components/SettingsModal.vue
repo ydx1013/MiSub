@@ -25,6 +25,11 @@ const prefixConfig = ref({
   manualNodePrefix: '手动节点'
 });
 
+// 新增：后缀配置的响应式对象
+const suffixConfig = ref({
+  enableSubscriptions: false
+});
+
 const hasWhitespace = computed(() => {
   const fieldsToCkeck = [
     'FileName',
@@ -70,6 +75,17 @@ const loadSettings = async () => {
         enableManualNodes: fallbackEnabled,
         enableSubscriptions: fallbackEnabled,
         manualNodePrefix: '手动节点'
+      };
+    }
+
+    // 加载后缀配置
+    if (settings.value.suffixConfig) {
+      suffixConfig.value = {
+        enableSubscriptions: settings.value.suffixConfig.enableSubscriptions ?? false
+      };
+    } else {
+      suffixConfig.value = {
+        enableSubscriptions: false
       };
     }
   } catch (error) {
@@ -142,6 +158,9 @@ const handleSave = async () => {
         enableManualNodes: prefixConfig.value.enableManualNodes,
         enableSubscriptions: prefixConfig.value.enableSubscriptions,
         manualNodePrefix: prefixConfig.value.manualNodePrefix
+      },
+      suffixConfig: {
+        enableSubscriptions: suffixConfig.value.enableSubscriptions
       }
     };
 
@@ -312,6 +331,22 @@ watch(() => props.show, (newValue) => {
                 </label>
               </div>
             </div>
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">节点名后缀设置</label>
+          <div class="space-y-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4">
+              <!-- 机场订阅后缀 -->
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-sm font-medium text-gray-700 dark:text-gray-300">机场订阅后缀</p>
+                  <p class="text-xs text-gray-500 dark:text-gray-400">为机场订阅节点添加订阅名后缀</p>
+                </div>
+                <label class="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" v-model="suffixConfig.enableSubscriptions" class="sr-only peer">
+                  <div class="w-11 h-6 bg-gray-200 peer-focus:outline-hidden rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-500 peer-checked:bg-indigo-600 dark:peer-checked:bg-green-600"></div>
+                </label>
+              </div>
           </div>
         </div>
         <div>
